@@ -1,0 +1,17 @@
+{
+  "openai": {
+    "vendor": "openai",
+    "technique_rankings": {},
+    "recommended_techniques": [],
+    "ineffective_techniques": [],
+    "dangerous_techniques": [],
+    "common_restrictions": [],
+    "bypass_patterns": [],
+    "near_miss_conversions": {
+      "[REDACTED]": "hex_encoding",
+      "cannot show": "base64_bypass"
+    },
+    "total_campaigns": 0,
+    "total_successes": 0
+  }
+}
