@@ -233,6 +233,7 @@ class AgentState(TypedDict, total=False):
     
     # Iteration tracking
     iteration: int
+    no_tool_count: int  # Consecutive responses without tool calls
     
     # Termination state
     finished: bool

@@ -116,13 +116,14 @@ def create_agent_graph(
         }
     
     # Define the routing function
-    def should_continue(state: AgentState) -> Literal["tools", "end"]:
+    def should_continue(state: AgentState) -> Literal["tools", "agent", "end"]:
         """
-        Determine whether to continue to tools or end.
+        Determine whether to continue to tools, back to agent, or end.
         
         Routes to:
-        - "end" if no tool calls or if "finish" tool was called
-        - "tools" if there are tool calls to execute
+        - "tools" if there are tool calls to execute (ALWAYS execute pending tools first)
+        - "end" if max iterations reached or "finished" flag is set (and no pending tools)
+        - "agent" if no tool calls (ask agent to try again with tools)
         """
         # Check if already finished
         if state.get("finished", False):
@@ -135,17 +136,30 @@ def create_agent_graph(
         
         last_message = messages[-1]
         
-        # Check for tool calls
+        # IMPORTANT: If there are tool calls, ALWAYS execute them first
+        # This ensures the agent's work is completed before checking iteration limits
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            # Check if "finish" tool was called
-            for tool_call in last_message.tool_calls:
-                tool_name = tool_call.get("name", "") if isinstance(tool_call, dict) else getattr(tool_call, "name", "")
-                if tool_name == "finish":
-                    # Don't route to tools - we want to execute finish and end
-                    return "tools"
             return "tools"
         
-        return "end"
+        # Check iteration limit ONLY when deciding whether to go back to agent
+        # This allows completing pending work but prevents new iterations
+        iteration = state.get("iteration", 0)
+        if iteration >= max_iterations:
+            return "end"
+        
+        # No tool calls - go back to agent (it should keep trying)
+        # But only if we haven't exceeded a reasonable number of no-tool responses
+        no_tool_count = state.get("no_tool_count", 0)
+        if no_tool_count >= 3:
+            # Agent keeps not calling tools, force end
+            return "end"
+        
+        return "agent"
+    
+    # Wrapper to increment no_tool_count when going back to agent
+    def increment_no_tool_count(state: AgentState) -> Dict[str, Any]:
+        """Track consecutive responses without tool calls."""
+        return {"no_tool_count": state.get("no_tool_count", 0) + 1}
     
     # Define a post-tool check for finish
     def check_finish(state: AgentState) -> Dict[str, Any]:
@@ -153,6 +167,7 @@ def create_agent_graph(
         Check if the finish tool was called and mark as finished.
         
         This node runs after tools and checks if we should terminate.
+        Also checks if we've reached max iterations after completing the tool calls.
         """
         messages = state.get("messages", [])
         
@@ -163,7 +178,20 @@ def create_agent_graph(
                 if "TASK COMPLETION REPORT" in msg.content:
                     return {"finished": True}
         
+        # Also check if we're at max iterations - if so, mark finished
+        # This ensures we stop after completing the final tool calls
+        iteration = state.get("iteration", 0)
+        if iteration >= max_iterations:
+            return {"finished": True}
+        
         return {}
+    
+    # Routing function after check_finish
+    def after_check_finish(state: AgentState) -> str:
+        """Route after checking finish: end if finished, otherwise continue."""
+        if state.get("finished", False):
+            return "end"
+        return "continue"
     
     # Build the graph
     graph = StateGraph(AgentState)
@@ -172,6 +200,7 @@ def create_agent_graph(
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("check_finish", check_finish)
+    graph.add_node("retry_agent", increment_no_tool_count)
     
     # Set entry point
     graph.set_entry_point("agent")
@@ -182,15 +211,19 @@ def create_agent_graph(
         should_continue,
         {
             "tools": "tools",
+            "agent": "retry_agent",
             "end": END,
         }
     )
+    
+    # Retry agent goes back to agent
+    graph.add_edge("retry_agent", "agent")
     
     # After tools, check if finish was called, then back to agent
     graph.add_edge("tools", "check_finish")
     graph.add_conditional_edges(
         "check_finish",
-        lambda state: "end" if state.get("finished", False) else "continue",
+        after_check_finish,
         {
             "end": END,
             "continue": "agent",
